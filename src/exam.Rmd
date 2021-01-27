@@ -1,0 +1,517 @@
+---
+title: "Forecasting Electricity Consumption"
+date: "`r format(as.Date('2020-11-30'), '%B %d, %Y')`"
+output:
+  rmarkdown::pdf_document:
+  bookdown::html_document2:
+linkcolor: blue
+toc: no
+header-includes:
+- \usepackage{floatrow}
+- \floatsetup[figure]{capposition=top}
+- \usepackage{booktabs}
+- \usepackage{longtable}
+- \usepackage{array}
+- \usepackage{multirow}
+- \usepackage{wrapfig}
+- \usepackage{float}
+- \usepackage{colortbl}
+- \usepackage{pdflscape}
+- \usepackage{tabu}
+- \usepackage{threeparttable}
+- \usepackage{threeparttablex}
+- \usepackage[normalem]{ulem}
+- \usepackage{makecell}
+- \usepackage[utf8]{inputenc}
+- \usepackage{amsfonts}
+- \usepackage{amssymb}
+- \usepackage{bm}
+- \usepackage{dcolumn}
+- \floatplacement{figure}{H}
+---
+
+<!--  set up default options and load the required packages  -->
+```{r setup, echo=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.width = 5, fig.height = 3)
+
+# load packages
+if(!require(pacman)) install.packages("pacman")
+p_load(writexl, magrittr, fpp2, ggplot2, data.table, vars, forecast)
+
+
+mai = par()$mai
+par(mai = c(1.02, 0.82, 0, 0.42))   # 0 instead of 0.82
+
+```
+
+<!-- read and split the data into train and test sets -->
+```{r series}
+
+# load dataset
+elec <- readxl::read_excel('D:/Downloads/Elec-train.xlsx')
+setDT(elec)[, Timestamp := as.POSIXct(Timestamp, format = '%m/%d/%Y %H:%M')]
+elec[, c('Date', 'Time', 'hm') := c(IDateTime(Timestamp), .(format(Timestamp, '%H:%M')))]
+
+
+# train dataset
+# I'll use 80% and 20% of the data for training and test sets respectively.
+
+serie <- ts(elec$`Power (kW)`[!is.na(elec$`Power (kW)`)], start = c(1, 6), frequency = 96)
+end_date_train <- as.IDate("2010-02-10")
+end_date_test <- as.IDate("2010-02-16")
+train <- elec[Date <= end_date_train, `Power (kW)`]
+test <- elec[Date > end_date_train & Date <= end_date_test, `Power (kW)`]
+
+N <- length(serie)   
+N_train <- length(train)
+N_test <- N - N_train
+test_perc <- sprintf("%.2f%%", N_test/N * 100)
+#cat("Percentage test set: ", test_perc)
+
+# train and test dataset
+train <- ts(train, start = start(serie), frequency = 96)
+test <- ts(test, end = end(serie), frequency = 96)
+
+# start and end time of the series
+start_date_train <- min(elec$Date)
+start_date_test <- end_date_train + 1
+
+
+```
+
+
+
+
+## Introduction {-#Introduction}
+
+This report explains the different models that have been considered in order to forecast the electricity consumption of a building. An additional variable, outdoor air temperature, will also be considered to eventually improve the forecast. The dataset contains time series  measured every 15 minutes and starting from `r start_date_train` to `r end_date_test`. Our main purpose is to forecast electricity consumption for `r max(elec$Date)`. This forecast will be perform using both univariate and multivariate time series models. In the first section, we discuss the forecast in the univariate context and in the second one will consider multivariate time series models; In the former case, we will consider exponential smoothing, NNAR, and ARIMA models, and the latter case, we will model the series using dynamic regression, NNAR, and VAR models.       
+To train the model, we will split the data into two sets: the training set which starts from `r start_date_train` to `r end_date_train`, and the testing set which starts from `r start_date_test` to `r end_date_test`. The testing set contains `r N_test` observations and represents about `r test_perc` of the total number of observations.
+
+
+
+
+
+
+##  Forecast  without using outdoor temperature
+
+
+Let start by plotting the electricity consumption series in order to have an insight about its pattern; As shown in Figure \ref{fig:seriesFigure}, electricity consumption is strongly seasonal although it is difficult to identify the periodicity visually.    
+
+
+```{r seriesFigure, fig.width=8, fig.pos="p", fig.cap="\\label{fig:seriesFigure}Electricity consumption"}
+
+# ts.plot(train, test, gpars = list(col = c("black", "red")))
+autoplot(ts.union("Training set" = train, "Testing set" = test)) +
+  theme(legend.position = "bottom") +
+  ylab("Power (kW)") + 
+  ggtitle(label = NULL) +
+  theme_bw()
+```
+
+
+To have a more detailed idea about the pattern of the cycles of this series, Figure \ref{fig:seasonalFigure} plots its seasonal pattern.
+
+```{r seasonalFigure, fig.width=6, fig.height=3.5, fig.cap="\\label{fig:seasonalFigure}Seasonal plot of electricity consumption"}
+
+par(mai = c(0.8, 0.82, 0, 0.42))   # 0 instead of 0.82 (default value of mai[3])
+
+colors <- grep('\\d', colors(T), v=T, invert=T) # set of distinct colors to choose from
+
+with(elec[yday(Timestamp)==2], plot(Time, `Power (kW)`, xaxt="n", type='l', ylim = range(serie)))
+for(v in unique(yday(elec$Timestamp))[-2]) elec[yday(Timestamp)==v, lines(Time, `Power (kW)`, col=colors[v*2])] 
+axis(1, at=elec$Time, labels=elec$hm, las=2)  # add label to x-axis
+
+```
+
+
+As the plot clearly shows, there is a strong seasonal pattern. A cycle can be roughly split into three main phases each of which has its own characteristics. From 00:00 to 08:15, we observe a electricity consumption (low power(KW)); this is likely due to the fact that at night people are sleeping. After, we observe a sudden jump from 08:15/08:30; this could be justified, for example, by the fact during the day people are working (or almost all companies are functionning). These two first phases also shows a slightly increasing trend. The last phase starts at around 17:15 till 23:00 where the electricity consumption increases further. After it sharply falls down around its starting point.
+
+The features of this plot suggests the use of a model that takes into account a seasonal pattern. That is, models like seasonal-exponential smoothing, seasonal ARIMA, seasonal NNAR, or seasonal VAR.
+
+To determine more precisely the models that could be used to forecast this time series, let's look at the ACF and PACF of the series.
+
+```{r seriesAcfAndPacf, fig.width=10, fig.height=3.5, fig.cap="\\label{fig:seriesAcfAndPacf}ACF and PACF of electricity consumption (in KW)"}
+
+#par(mrfrow = 1:2)
+# layout(t(1:2))
+# acf(train, 96*2, xlim = c(0, 2))
+# pacf(train, 96*2, xlim = c(0, 2))
+
+par(mai = c(0.8, 0.82, 0, 0.42))
+
+layout(t(1:2))
+acf(train, 96*4, xlim = c(0, 3))
+pacf(train, 96*4, xlim = c(0, 3))
+
+```
+
+In Figure \ref{fig:seriesAcfAndPacf}, the ACF plot (left panel) suggests that the series has a trend and is correlated; the pacf plot (right panel) is very persistent and shows a large correlation at 1, 2 etc. which, in our data, correspond to lag $96 \times 1$, $96 \times 2$, etc.[^1]. Further it tends to increase and then decrease repeatedly indicating that there is a seasonal pattern in the data. The ACF looks like a pure seasonal pattern series. Based on these characteristics, we can deduce that seasonal exponential smoothing (with and without dumping effect) are already two potential candidates to modelize our series.
+
+[^1]: Note that the periodicity in the series normally contains 96 observations (the number of data points observed in a day)
+
+In order to remove the linear trend and seasonal component in the data, we compute the first difference at lag 96 (length of a periodicity) of the series and then plot the ACF and PACF again.
+
+
+```{r acfAndPacfDiff1, fig.width=10, fig.height=4, fig.cap="\\label{fig:acfAndPacfDiff1}ACF and PACF of the first difference of electricity consumption (in KW) at lag 96"}
+
+par(mai = c(0.8, 0.82, 0, 0.42))
+
+layout(t(1:2))
+train_d1_l96 <- diff(train, lag = 96)
+acf(train_d1_l96, 96*4, xlim = c(0, 3))
+pacf(train_d1_l96, 96*4, xlim = c(0, 3))
+```
+
+The plot, Figure \ref{fig:acfAndPacfDiff1}, still shows that a strong exponential decaying autocorrelation and a persistent but exponentially decaying pacf at lag $96 \times 1$, lag $96 \times 2$, etc.
+
+
+Let's difference the data once more.
+
+
+```{r acfAndPacfDiff2, fig.width=10, fig.height=4, fig.cap="\\label{fig:acfAndPacfDiff2}ACF and PACF of the $2^{nd}$ difference of electricity consumption (in KW)"}
+
+par(mai = c(0.8, 0.82, 0, 0.42))
+
+layout(t(1:2))
+train_d1_l96_d1 <- diff(train_d1_l96)
+acf(train_d1_l96_d1, 96*3, xlim = c(0, 3))
+pacf(train_d1_l96_d1, 96*3, xlim = c(0, 3))
+```
+
+The significant ACF at lag 1 and 2 suggests an $AM_2$ for the seasonal part of SARIMA; and the significant at lag 96 (1 on the graph) suggests an $MA_1$ for the seasonal component; this leads to a $SARIMA_{(0,1,2)(0,1,1)}$. Similar interpretation of the PACF suggests an $AR_1$ or $AR_2$ or even more for the seasonal part and to do the same for the non-seasonal component. As a consequence, we have to consider $SARIMA_{(p,1,0)(1,1,1)}$ or $SARIMA_{(p,1,0)(2,1,1)}$ for several reasonable values of $p$.
+
+When we continue to difference this series (even more than 10 times), the ACF and PACF do not show any improvement; that is, we continue to observe a persistent correlation on both graphs. This is a clear sign that ARIMA model (and SARIMA) is likely not appropriate for this data. 
+
+The last model that we will consider for this time series is a seasonal neural network auto-regressive model. 
+
+To summarize, the potentials models that we selected are:  seasonal HW smoothing (with and without damping effect), seasonal $ARIMA$ (SARIMA), and seasonal neural network.
+
+Let estimates these model in turn and check their performance in forecasting using the test dataset.
+
+### Exponential smoothing: seasonal HW smoothing
+
+Figure \ref{fig:expoSmoothHW} plots the true values of the test series and the forecast values obtained using seasonal HW smoothing models where the seasonal component of the series enter the model both additively and multiplicatively.   
+
+
+```{r expoSmoothHW, fig.width=10, fig.height=4, fig.cap="\\label{fig:expoSmoothHW}Forecast vs Test series using seasonal HW smoothing"}
+hw_season_add <- HoltWinters(train, alpha = NULL, beta = NULL, gamma = NULL, seasonal = "additive")
+hw_season_mul <- HoltWinters(train, alpha = NULL, beta = NULL, gamma = NULL, seasonal = "multiplicative")
+
+hw_season_add_pred <- predict(hw_season_add, n.ahead = N_test)
+hw_season_mul_pred <- predict(hw_season_mul, n.ahead = N_test)
+
+par(mai = c(0.8, 0.82, 0.2, 0.42))
+
+# additive seasonal hw
+## all
+layout(t(1:2))
+# plot(serie, type = 'n')
+# lines(train, col = 'black')
+# lines(hw_season_add_pred, col = 'red')
+# lines(test, col = 'blue')
+
+
+## zoom section of the plot on prediction
+plot(test, ylim = c(125, 350), cex.main = .9, ylab = "Forecast and test series",  main = "Additive HW")
+lines(hw_season_add_pred, col = 'red')
+lines(test)
+
+legend(x = 41.3, y = 367, legend = c("Forecast", "Test series"), lty = 1, col = c("red", "black"), bty = "n")
+
+# multiplicative seasonal hw
+# plot(serie, type = 'n')
+# lines(train, col = 'black')
+# lines(hw_season_mul_pred, col = 'red')
+# lines(test, col = 'blue')
+
+## zoom section of the plot on prediction
+plot(test, ylim = c(125, 350), cex.main = .9, ylab = "Forecast and test series", main = "Multiplicative HW")
+lines(hw_season_mul_pred, col = 'red')
+lines(test)
+
+legend(x = 41.3, y = 367, legend = c("Forecast", "Test series"), lty = 1, col = c("red", "black"), bty = "n")
+
+
+
+```
+
+In Figure \ref{fig:expoSmoothHW}, the forecast with multiplicative seasonal component is relatively closer to the true values of the series compared to that with additive seasonal component; that is, when looking at the graph, the model seasonal HW smoothing performs better. To quantify the forecast performance, let compute the root mean square error in both cases. 
+
+
+```{r}
+hw_season_add_RMSE <- sqrt(mean((test - hw_season_add_pred)^2)) %>% round(2)
+hw_season_mul_pred_RMSE <- sqrt(mean((test - hw_season_mul_pred)^2)) %>% round(2)
+```
+
+The RMSE using Multiplicative seasonal Holt-Winters is lower than that obtained with Additive seasonal Holt-Winters (`r hw_season_mul_pred_RMSE` vs `r hw_season_add_RMSE`)
+
+A noticeable remark on this plot is that forecast tend to be systematically lower than the true value of the series. This effect is more pronounced when considering additive seasonality, making the Holt-Winters model with multiplicative seasonality compact relatively better.
+
+
+Unfortunately, The seasonal Holt-Winters model with dumped effect cannot be performed on our series due to the fact that the frequency per period (96 observations per period) is higher than the maximum value allowed (24 observations per period) in the `hw` function of the `forecast` package. Therefore, this model will not be considered.
+
+
+
+```{r expoSmoothHWDamping, echo=FALSE, eval=FALSE}
+
+# NOTE: THIS CHUNK CANNOT BE USED BECAUSE DAMPING HW REQUIRES THE NUMBER OF OBSERVATIONS PER PERIOD TO BE LOWER OR EQUAL TO 24 (QUARTERLY, MONTHLY, YEARLY DATA, etc.)  --> eval=FALSE
+
+hw_season_add_pred_dump <- hw(train, h = N_test, alpha = NULL, beta = NULL, gamma = NULL, damped = TRUE, seasonal = "additive")
+hw_season_mul_pred_dump <- hw(train, h = N_test, alpha = NULL, beta = NULL, gamma = NULL, damped = TRUE, seasonal = "multiplicative")
+
+plot(test, ylim = c(125, 350), cex.main = .9, ylab = "Forecast and test series",  main = "Additive HW")
+lines(hw_season_add_pred_dump$mean, col = 'red')
+lines(test)
+legend(x = 41.3, y = 367, legend = c("Forecast", "Test series"), lty = 1, col = c("red", "black"), bty = "n")
+
+
+plot(test, ylim = c(125, 350), cex.main = .9, ylab = "Forecast and test series", main = "Multiplicative HW")
+lines(hw_season_mul_pred_dump$mean, col = 'red')
+lines(test)
+legend(x = 41.3, y = 367, legend = c("Forecast", "Test series"), lty = 1, col = c("red", "black"), bty = "n")
+
+```
+
+
+
+<!--At this step, we obtain that _Multiplicative seasonal Holt-Winters_ performs better compared to _Additive seasonal Holt-Winters_.-->
+
+
+### Seasonal ARIMA
+
+```{r}
+
+# automatic arima
+sarima0 <- auto.arima(train)
+sarima0_pred <- forecast(sarima0, h = N_test)
+
+
+sarima1 <- Arima(train, order = c(4, 1, 1), seasonal = c(0, 1, 0))
+sarima1_pred <- forecast(sarima1, h = N_test)
+
+# 
+# sarima2 <- Arima(train, order = c(2, 1, 1), seasonal = c(2, 1, 1))
+# sarima2_pred <- forecast(sarima1, h = N_test)
+
+```
+
+
+Because of the large size and frequency of the series, almost all seasonal SARIMA require a more powerful machine for its execution. Nevertheless, two cases have been implemented but the analysis of the residuals is far from being satisfactory. The normality test does not hold at all (regardless of the number of times we compute the series difference)
+
+```{r}
+# auto ARIMA analysis of residuals
+checkresiduals(sarima0)
+```
+
+
+
+```{r}
+# sarima1 analysis of residuals
+checkresiduals(sarima1)
+```
+
+
+### Seasonal Neural Network Auto-Regression (NNAR)
+
+In this section, we will consider two cases of seasonal NNAR: one where the parameters values are automatically chosen by the function and another where the lag orders for seasonal and non-seasonal components are set to 7. The value 7 has been chosen in order to potentially capture days of weeks effect. 
+
+```{r NNAR, fig.width=8, fig.height=4}
+
+layout(t(1:2))
+
+nar <- nnetar(train)
+pred_NNAR <- forecast(nar, h = N_test)
+ts.plot(test, pred_NNAR$mean, gpars = list(col = 1:2))
+#cat("NNAR : ", sqrt(mean((test - pred_NNAR$mean)^2)))
+
+nar2 <- nnetar(train, 7, 7)
+pred_NNAR2 <- forecast(nar2, h = N_test)
+ts.plot(test, pred_NNAR2$mean, gpars = list(col = 1:2))
+
+RMSE_NNARAuto <- sqrt(mean((test - pred_NNAR$mean)^2))
+RMSE_NNAR <- sqrt(mean((test - pred_NNAR2$mean)^2))
+
+#cat("NNAR auto : ", RMSE_NNARAuto)
+#cat("NNAR      : ", RMSE_NNAR)
+
+reduction_factor <- sprintf("%.2f%%", RMSE_NNAR/RMSE_NNARAuto * 100)
+
+```
+
+The RMSE using auto-selection of parameter values is actually much more poor than that obtained by considering the order of autocorrelation of seasonal and non-seasonal components of the series to be 7.
+
+Further, the RMSE using Neural Network Auto-Regression (NNAR) is largely lower than that obtained using Exponential smoothing models before (`r round(RMSE_NNAR, 2)` vs `r hw_season_mul_pred_RMSE`). 
+This happens only when we modify the parameters of the NNAR compared to automatic NNAR which has a large RMSE. The new value of RMSE is about `r reduction_factor` the value obtained with automatic choice of the values of the parameters
+
+The forecast and test series are both plotted in Figure \ref{fig:nntarFigure}.
+
+```{r nntarFigure, fig.width=5, fig.height=4, fig.cap="\\label{fig:nntarFigure}Forecast vs Test series using seasonal NNAR"}
+
+plot(test, ylim = c(125, 350), ylab = "Forecast and test series")
+lines(pred_NNAR2$mean, col = 'red')
+lines(test)
+
+legend(x = 41.3, y = 367, legend = c("Forecast", "Test series"), lty = 1, col = c("red", "black"), bty = "n")
+
+```
+
+As shown in Figure \ref{fig:nntarFigure}, the forecast is clearly better than that obtained using exponential smoothing model. This forecast solves (partially) the problem observed with smoothing model, which systematically underestimates the series; but even in this case, the series tends to be underestimated around the peak of the seasonality pattern.
+
+
+To summarize, the model that performs better among all those used so far is the seasonal NNAR.
+
+
+
+## Forecast using outdoor temperature
+
+In this section, we will move further by considering the temperature together with past values of the electricity consumption to make the forecast; the aim being to use temperature to potentially improve the forecast performance.
+
+The data used for this section is plotted in Figure \ref{fig:bivariateFigure}
+
+```{r bivariateFigure, fig.width=6, fig.height=3, fig.cap="\\label{fig:bivariateFigure} Electricity consumption and Temperature"}
+
+autoplot(ts.union(train, test)) + 
+  ylab("power (in KW) and Temperature") +
+  ggtitle(NULL) +
+  theme_bw()
+
+```
+
+
+```{r multivariateSeries}
+
+data <- ts(elec[!is.na(`Power (kW)`), .(`Power (kW)`, `Temp (C°)`)], start = c(1, 6), frequency = 96)
+end_date_train <- as.IDate("2010-02-10")
+end_date_test <- as.IDate("2010-02-16")
+train <- elec[Date <= end_date_train, .(`Power (kW)`, `Temp (C°)`)]
+test <- elec[Date > end_date_train & Date <= end_date_test, .(`Power (kW)`, `Temp (C°)`)]
+
+N <- nrow(data)   
+N_train <- nrow(train)
+N_test <- N - N_train
+test_perc <- sprintf("%.2f%%", N_test/N * 100)
+
+train <- ts(train, start = start(data), frequency = frequency(data))
+test <- ts(test, end = end(data), frequency = frequency(data))
+
+```
+
+
+
+### Multivariate seasonal ARIMA (Dynamic regression model)
+
+Let estimate a dynamic regression using the `auto.arima` function. I also tried the model used before, an $ARIMA_{(2,1,1)(2,1,1)}$, and $ARIMA_{(2,1,1)(1,1,1)}$ but in both cases the algorithm used in `Arima` complained and did not allow to estimate the model. For this reason, only the automatic arima will be considered. D is set to 1 to enforce seasonality.
+
+When looking at the seasonality plot, it is obvious that including temperature in the model did not allow to obtain residuals that are normally distributed in practice. Adding lag values did not allow to obtain satisfactory residuals.
+
+
+
+```{r bivareAutoSARIMA}
+
+multiv_arima0 <- auto.arima(train[, "Power (kW)"], xreg = train[, "Temp (C°)"], D = 1)
+#multiv_arima1 <- Arima(train[, "Power (kW)"], order = c(2, 1, 1), seasonal = c(1, 1, 1), xreg = train[, "Temp (C°)"])
+
+# auto.arima
+summary(multiv_arima0)
+# 
+#summary(multiv_arima1)
+
+checkresiduals(multiv_arima0)
+```
+
+
+### VAR model
+
+Let select the order of the autoregressive part of the model.
+
+```{r VARorder}
+
+# select VAR order
+VARselect(train, lag.max = 30, type = "both", season = 96)$selection
+
+```
+
+Because both series (electricity and temperature) are strongly seasonal (see Figure \ref{fig:seasonalFigure} about electricity consumption and Figure \ref{fig:bivariateFigureTemp}  about temperature), we add seasonal dummy in the VAR to control the seasonal effect. From Figure \ref{fig:seasonalFigure}, we deduce that the electricity consumption is slightly trended and not centered around 0. As a consequence, we need to add both a trend and constant to the model in addition to the seasonal dummy variable, which account for the seasonal nature of the series.
+
+```{r bivariateFigureTemp, fig.width=6, fig.height=3.5, fig.asp=.5, fig.cap="\\label{fig:bivariateFigureTemp} Seasonal plot for temperature"}
+
+par(mai = c(0.8, 0.82, 0, 0.42))
+
+seasonplot(ts.union(train[, "Temp (C°)"], test[, "Temp (C°)"]), type = "l", main = "")
+
+```
+
+
+
+
+
+By comparing the plot of forecast and test series, we can conclude than the seasonal NNAR, which is the best model so far, also outperforms the VAR model, which has the same drawback found in the context of exponential smoothing model (systematic underestimation of the series).
+
+
+```{r modelVAR}
+
+mod_var <- VAR(train, p = 5, type = "both", season = 96)
+pred_var <- forecast(mod_var, h = N_test)
+
+par(mai = c(0.8, 0.82, 0, 0.42))
+
+plot(test[, "Power (kW)"], ylim = c(125, 350), cex.main = .9, ylab = "Forecast and test series")
+lines(pred_var$forecast$Power..kW.$mean, col = 'red')
+
+legend(x = 41.3, y = 367, legend = c("Forecast", "Test series"), lty = 1, col = c("red", "black"), bty = "n")
+
+```
+
+
+```{r}
+VAR_RMSE <- sqrt(mean((test[, "Power (kW)"] - pred_var$forecast$Power..kW.$mean)^2))
+
+```
+
+The RMSE for VAR model is estimated to be `r round(VAR_RMSE, 2)`, which is lower that its counterpart `r round(RMSE_NNAR, 2)` obtained using NNAR model (in the univariate case).
+
+
+Now, we consider an NNAR with temperature embedded in the model. 
+
+```{r bivariateNNRFigure, fig.width=6, fig.height=4, fig.cap="\\label{fig:bivariateNNRFigure}Forecast and test series using NNAR and temperature"}
+
+bivariate_nnet <- nnetar(train[, "Power (kW)"], 10, 7, size = 30, xreg = train[, "Temp (C°)"])
+bivariate_nnet_pred <- forecast(bivariate_nnet, h = N_test, xreg = test[, "Temp (C°)"])
+ts.plot(test[, "Power (kW)"], bivariate_nnet_pred$mean, col = 1:2)
+
+par(mai = c(0.8, 0.82, 0, 0.42))
+
+bivariateNNR_RMSE <- sqrt(mean((test[, "Power (kW)"] - bivariate_nnet_pred$mean)^2))
+
+```
+
+The resulting RMSE is equal to `r round(bivariateNNR_RMSE, 2)` is slightly lower than that obtained using VAR model. Therefore, NNAR performs better than all the other models considered, either in the univariate case or in the multivariate one (when we account for temperature).
+
+
+### Forecasting electricity consumption on `r end_date_test + 1`. 
+
+Since the best among all the models tried is NNAR, let re-estimate the models using all the dataset and then forecast electricity consumption on `r end_date_test + 1` assuming that the temperature is known.    
+The output data is exported to an excel file named _ChristianKamgang.xlsx_.
+
+
+
+```{r}
+
+# using one series
+nar2 <- nnetar(data[, "Power (kW)"], 7, 7)
+pred_NNAR2 <- forecast(nar2, h = 96)
+
+
+biv_nnet <- nnetar(data[, "Power (kW)"], 10, 7, size = 30, xreg = data[, "Temp (C°)"])
+temp = ts(elec[is.na(`Power (kW)`), `Temp (C°)`], start = c(48, 1), frequency = frequency(data))
+biv_nnet_pred <- forecast(biv_nnet, h = 96, xreg = temp)
+
+predictions <- data.table(`Forecast(without outdoor temperature)` = pred_NNAR2$mean,
+                          `Forecast(with outdoor temperature)` = biv_nnet_pred$mean)
+
+write_xlsx(predictions, path = "ChristianKamgang.xlsx")
+
+```
+
+
+
