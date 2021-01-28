@@ -1,6 +1,6 @@
 # Project: Forecasting Electricity Consumption
 _Forecasting Electricity Consumption_ is a low-scale small project that aims at forecasting electricity consumption for buildings
-using univariate exponential smoothing, NNAR (neural network auto-regressive), and ARIMA models. Will also consider multivariate
+using univariate exponential smoothing, NNAR (neural network auto-regressive), and ARIMA models. We will also consider multivariate
 dynamic regression, NNAR, and VAR models.
 
 Model selection is mainly based on cross-validation technique; and model performance is measured using mean square error.
