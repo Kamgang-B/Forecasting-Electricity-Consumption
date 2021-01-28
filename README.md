@@ -7,6 +7,7 @@ Model selection is mainly based on cross-validation technique; and model perform
 
 # Repository structure
 
+```
 Forecasting Electricity Consumption/
 ├── data
 │   ├── external
@@ -23,3 +24,5 @@ Forecasting Electricity Consumption/
     ├── data
     └── features
 	
+Electricity Forecasting using exponential smoothing, NNAR, ARIMA, dynamic regression, and VAR.
+```
