@@ -23,6 +23,4 @@ Forecasting Electricity Consumption/
 └── src
     ├── data
     └── features
-	
-Electricity Forecasting using exponential smoothing, NNAR, ARIMA, dynamic regression, and VAR.
 ```
